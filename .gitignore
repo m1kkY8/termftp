@@ -1,0 +1,19 @@
+# Build artifacts
+bin/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Go build cache
+*.test
+*.out
+
+# Editor and OS junk
+.DS_Store
+Thumbs.db
+
+# Local configs/secrets overrides (if any)
+config.local.yaml
+config.yaml
