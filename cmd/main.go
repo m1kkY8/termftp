@@ -2,16 +2,24 @@ package main
 
 import (
 	"fmt"
-	"log"
+	"os"
 
+	tea "github.com/charmbracelet/bubbletea"
 	"github.com/m1kkY8/termftp/internal/config"
 	"github.com/m1kkY8/termftp/internal/sftpclient"
+	"github.com/m1kkY8/termftp/internal/ui"
 )
 
 func main() {
-	if err := run(); err != nil {
-		log.Fatal(err)
+	m := ui.New()
+	if _, err := tea.NewProgram(m).Run(); err != nil {
+		fmt.Println("Error running program:", err)
+		os.Exit(1)
 	}
+
+	// if err := run(); err != nil {
+	// 	log.Fatal(err)
+	// }
 }
 
 func run() error {
