@@ -77,4 +77,5 @@ type transferState struct {
 	err         error
 	lastUpdate  time.Time
 	rate        float64
+	refreshPane int
 }

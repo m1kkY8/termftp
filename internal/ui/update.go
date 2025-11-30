@@ -66,6 +66,8 @@ func (m *model) handleKey(msg tea.KeyMsg) tea.Cmd {
 		}
 	case "p":
 		return m.uploadSelected()
+	case "g":
+		return m.downloadSelected()
 	}
 	return nil
 }

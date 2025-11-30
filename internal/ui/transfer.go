@@ -5,6 +5,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -20,18 +21,19 @@ type transferProgressMsg struct {
 }
 
 type transferJob struct {
-	local  *os.File
-	remote *sftp.File
-	buffer []byte
+	reader  io.Reader
+	writer  io.Writer
+	closers []io.Closer
+	buffer  []byte
 }
 
 func (j *transferJob) step() (int64, bool, error) {
 	if j.buffer == nil {
 		j.buffer = make([]byte, transferChunkSize)
 	}
-	read, readErr := j.local.Read(j.buffer)
+	read, readErr := j.reader.Read(j.buffer)
 	if read > 0 {
-		if _, writeErr := j.remote.Write(j.buffer[:read]); writeErr != nil {
+		if _, writeErr := j.writer.Write(j.buffer[:read]); writeErr != nil {
 			return int64(read), true, writeErr
 		}
 	}
@@ -46,16 +48,15 @@ func (j *transferJob) step() (int64, bool, error) {
 
 func (j *transferJob) close() error {
 	var err error
-	if j.local != nil {
-		err = j.local.Close()
-		j.local = nil
-	}
-	if j.remote != nil {
-		if cerr := j.remote.Close(); err == nil {
+	for _, c := range j.closers {
+		if c == nil {
+			continue
+		}
+		if cerr := c.Close(); err == nil {
 			err = cerr
 		}
-		j.remote = nil
 	}
+	j.closers = nil
 	return err
 }
 
@@ -95,7 +96,11 @@ func (m *model) uploadSelected() tea.Cmd {
 		file.Close()
 		return tea.Printf("create remote file: %v", err)
 	}
-	m.job = &transferJob{local: file, remote: rc}
+	m.job = &transferJob{
+		reader:  file,
+		writer:  rc,
+		closers: []io.Closer{file, rc},
+	}
 	m.transfer = transferState{
 		active:      true,
 		direction:   "Upload",
@@ -104,6 +109,60 @@ func (m *model) uploadSelected() tea.Cmd {
 		transferred: 0,
 		started:     time.Now(),
 		lastUpdate:  time.Now(),
+		refreshPane: paneRemote,
+	}
+	return tea.Batch(m.processTransferChunk())
+}
+
+func (m *model) downloadSelected() tea.Cmd {
+	if len(m.panes) < 2 || m.client == nil {
+		return tea.Printf("remote client unavailable")
+	}
+	if m.transfer.active {
+		return tea.Printf("transfer already running")
+	}
+	remotePane := m.panes[paneRemote]
+	localPane := m.panes[paneLocal]
+	row := remotePane.table.SelectedRow()
+	if row == nil {
+		return tea.Printf("no file selected")
+	}
+	if row[colType] == rowTypeDir {
+		return tea.Printf("directories not supported yet")
+	}
+	remotePath := filepath.Join(remotePane.cwd, row[colName])
+	localPath := filepath.Join(localPane.cwd, row[colName])
+	if err := os.MkdirAll(filepath.Dir(localPath), 0o755); err != nil {
+		return tea.Printf("prepare local dir: %v", err)
+	}
+	remoteFile, err := m.client.Open(remotePath)
+	if err != nil {
+		return tea.Printf("open remote file: %v", err)
+	}
+	info, err := remoteFile.Stat()
+	if err != nil {
+		remoteFile.Close()
+		return tea.Printf("stat remote file: %v", err)
+	}
+	localFile, err := os.Create(localPath)
+	if err != nil {
+		remoteFile.Close()
+		return tea.Printf("create local file: %v", err)
+	}
+	m.job = &transferJob{
+		reader:  remoteFile,
+		writer:  localFile,
+		closers: []io.Closer{remoteFile, localFile},
+	}
+	m.transfer = transferState{
+		active:      true,
+		direction:   "Download",
+		filename:    filepath.Base(remotePath),
+		total:       info.Size(),
+		transferred: 0,
+		started:     time.Now(),
+		lastUpdate:  time.Now(),
+		refreshPane: paneLocal,
 	}
 	return tea.Batch(m.processTransferChunk())
 }
@@ -151,15 +210,17 @@ func (m *model) finishTransfer(resultErr error) tea.Cmd {
 	}
 	m.transfer.active = false
 	m.transfer.err = resultErr
+	refreshPane := m.transfer.refreshPane
+	m.transfer.refreshPane = 0
 
 	var cmds []tea.Cmd
 	if resultErr == nil {
-		if len(m.panes) > paneRemote {
-			_ = m.panes[paneRemote].changeDirectory(m.panes[paneRemote].cwd)
+		if refreshPane >= 0 && refreshPane < len(m.panes) {
+			_ = m.panes[refreshPane].changeDirectory(m.panes[refreshPane].cwd)
 		}
-		cmds = append(cmds, tea.Printf("upload complete: %s", m.transfer.filename))
+		cmds = append(cmds, tea.Printf("%s complete: %s", strings.ToLower(m.transfer.direction), m.transfer.filename))
 	} else {
-		cmds = append(cmds, tea.Printf("upload failed: %v", resultErr))
+		cmds = append(cmds, tea.Printf("%s failed: %v", strings.ToLower(m.transfer.direction), resultErr))
 	}
 	return tea.Batch(cmds...)
 }
