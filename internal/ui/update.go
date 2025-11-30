@@ -13,10 +13,12 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if cmd := m.handleKey(msg); cmd != nil {
 			return m, cmd
 		}
-	case transferProgressMsg:
-		if cmd := m.handleTransferProgress(msg); cmd != nil {
+	case transferTickMsg:
+		if cmd := m.handleTransferTick(); cmd != nil {
 			return m, cmd
 		}
+	case transferDoneMsg:
+		return m, m.finishTransfer(msg.err)
 	}
 
 	cmds := make([]tea.Cmd, 0, len(m.panes))

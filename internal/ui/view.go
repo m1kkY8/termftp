@@ -67,7 +67,7 @@ func (m *model) renderTransferPane(width int) string {
 		m.progress.Width = max(10, width-4)
 		bar := m.progress.ViewAs(percent)
 		stats := fmt.Sprintf(
-			"%s %s %s/%s (%s) • %s • ETA %s",
+			"%s %s %s/%s (%s) • %s • ETA %s • Elapsed %s",
 			m.transfer.direction,
 			formatFilename(m.transfer.filename),
 			formatBytes(m.transfer.transferred),
@@ -75,6 +75,7 @@ func (m *model) renderTransferPane(width int) string {
 			formatPercent(percent, m.transfer.total > 0),
 			formatSpeed(m.transfer),
 			formatETA(m.transfer),
+			formatElapsed(m.transfer),
 		)
 		body = stats + "\n" + bar
 	} else if m.transfer.err != nil {
@@ -102,6 +103,21 @@ func formatETA(t transferState) string {
 	if eta >= time.Hour {
 		hours := eta / time.Hour
 		minutes = (eta % time.Hour) / time.Minute
+		return fmt.Sprintf("%02d:%02d:%02d", hours, minutes, seconds)
+	}
+	return fmt.Sprintf("%02d:%02d", minutes, seconds)
+}
+
+func formatElapsed(t transferState) string {
+	elapsed := t.elapsed()
+	if elapsed <= 0 {
+		return "--"
+	}
+	minutes := elapsed / time.Minute
+	seconds := (elapsed % time.Minute) / time.Second
+	if elapsed >= time.Hour {
+		hours := elapsed / time.Hour
+		minutes = (elapsed % time.Hour) / time.Minute
 		return fmt.Sprintf("%02d:%02d:%02d", hours, minutes, seconds)
 	}
 	return fmt.Sprintf("%02d:%02d", minutes, seconds)

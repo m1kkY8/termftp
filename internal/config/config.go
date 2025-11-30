@@ -6,16 +6,35 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
 
+const (
+	defaultMaxPacketKB        = 1024
+	defaultConcurrentRequests = 128
+	defaultParallelStreams    = 4
+	defaultBufferMiB          = 8
+	defaultProgressInterval   = 75 * time.Millisecond
+)
+
 type Config struct {
-	Host     string `yaml:"host"`
-	Port     int    `yaml:"port"`
-	User     string `yaml:"user"`
-	Password string `yaml:"password"`
-	Root     string `yaml:"root"`
+	Host        string            `yaml:"host"`
+	Port        int               `yaml:"port"`
+	User        string            `yaml:"user"`
+	Password    string            `yaml:"password"`
+	Root        string            `yaml:"root"`
+	Performance PerformanceConfig `yaml:"performance"`
+	Cipher      string            `yaml:"cipher"`
+}
+
+type PerformanceConfig struct {
+	MaxPacketKB        int `yaml:"maxPacketKB"`
+	ConcurrentRequests int `yaml:"concurrentRequests"`
+	ParallelStreams    int `yaml:"parallelStreams"`
+	BufferMiB          int `yaml:"bufferMiB"`
+	ProgressIntervalMs int `yaml:"progressIntervalMs"`
 }
 
 func LoadConfig() (*Config, error) {
@@ -32,6 +51,7 @@ func LoadConfig() (*Config, error) {
 	if err := yaml.Unmarshal(data, &cfg); err != nil {
 		return nil, fmt.Errorf("unmarshal config: %w", err)
 	}
+	cfg.applyDefaults()
 
 	if err := validate(&cfg); err != nil {
 		return nil, err
@@ -54,6 +74,65 @@ func validate(cfg *Config) error {
 		return errors.New("config root is required")
 	}
 	return nil
+}
+
+func (cfg *Config) applyDefaults() {
+	cfg.Performance.applyDefaults()
+}
+
+func (p *PerformanceConfig) applyDefaults() {
+	if p.MaxPacketKB <= 0 {
+		p.MaxPacketKB = defaultMaxPacketKB
+	}
+	if p.ConcurrentRequests <= 0 {
+		p.ConcurrentRequests = defaultConcurrentRequests
+	}
+	if p.ParallelStreams <= 0 {
+		p.ParallelStreams = defaultParallelStreams
+	}
+	if p.BufferMiB <= 0 {
+		p.BufferMiB = defaultBufferMiB
+	}
+	if p.ProgressIntervalMs <= 0 {
+		p.ProgressIntervalMs = int(defaultProgressInterval / time.Millisecond)
+	}
+}
+
+func (cfg *Config) MaxPacketBytes() int {
+	return clampInt(cfg.Performance.MaxPacketKB, 32, 4096) * 1024
+}
+
+func (cfg *Config) ConcurrentRequests() int {
+	return clampInt(cfg.Performance.ConcurrentRequests, 16, 512)
+}
+
+func (cfg *Config) ParallelStreams() int {
+	return clampInt(cfg.Performance.ParallelStreams, 1, 32)
+}
+
+func (cfg *Config) BufferSizeBytes() int {
+	return clampInt(cfg.Performance.BufferMiB, 1, 64) * 1024 * 1024
+}
+
+func (cfg *Config) ProgressInterval() time.Duration {
+	return time.Duration(clampInt(cfg.Performance.ProgressIntervalMs, 25, 1000)) * time.Millisecond
+}
+
+func clampInt(value, min, max int) int {
+	if value < min {
+		return min
+	}
+	if value > max {
+		return max
+	}
+	return value
+}
+
+func (cfg *Config) SSHCiphers() []string {
+	if strings.TrimSpace(cfg.Cipher) == "" {
+		return nil
+	}
+	return []string{strings.TrimSpace(cfg.Cipher)}
 }
 
 func resolveConfigPath() (string, error) {

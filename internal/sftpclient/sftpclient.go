@@ -14,11 +14,7 @@ import (
 )
 
 const defaultSSHPort = 22
-const (
-	maxPacketBytes               = 1 << 20 // 1 MiB packets keep queues full
-	fallbackPacketBytes          = 32 * 1024
-	maxConcurrentRequestsPerFile = 64
-)
+const fallbackPacketBytes = 32 * 1024
 
 type Client struct {
 	*sftp.Client
@@ -37,6 +33,9 @@ func New(cfg *config.Config) (*Client, error) {
 		},
 		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
 	}
+	if ciphers := cfg.SSHCiphers(); len(ciphers) > 0 {
+		sshConfig.Config.Ciphers = ciphers
+	}
 
 	addr := address(cfg)
 
@@ -45,7 +44,7 @@ func New(cfg *config.Config) (*Client, error) {
 		return nil, fmt.Errorf("dial ssh: %w", err)
 	}
 
-	sftpConn, err := dialSFTP(sshConn)
+	sftpConn, err := dialSFTP(sshConn, cfg)
 	if err != nil {
 		sshConn.Close()
 		return nil, fmt.Errorf("create sftp client: %w", err)
@@ -71,10 +70,12 @@ func (c *Client) Close() error {
 	return err
 }
 
-func dialSFTP(sshConn *ssh.Client) (*sftp.Client, error) {
+func dialSFTP(sshConn *ssh.Client, cfg *config.Config) (*sftp.Client, error) {
+	packetSize := cfg.MaxPacketBytes()
+	concurrency := cfg.ConcurrentRequests()
 	primaryOpts := []sftp.ClientOption{
-		sftp.MaxPacket(maxPacketBytes),
-		sftp.MaxConcurrentRequestsPerFile(maxConcurrentRequestsPerFile),
+		sftp.MaxPacket(packetSize),
+		sftp.MaxConcurrentRequestsPerFile(concurrency),
 		sftp.UseConcurrentReads(true),
 		sftp.UseConcurrentWrites(true),
 	}
@@ -86,8 +87,8 @@ func dialSFTP(sshConn *ssh.Client) (*sftp.Client, error) {
 		return nil, err
 	}
 	fallbackOpts := []sftp.ClientOption{
-		sftp.MaxPacket(fallbackPacketBytes),
-		sftp.MaxConcurrentRequestsPerFile(maxConcurrentRequestsPerFile / 2),
+		sftp.MaxPacket(minInt(packetSize/2, fallbackPacketBytes)),
+		sftp.MaxConcurrentRequestsPerFile(max(concurrency/2, 16)),
 		sftp.UseConcurrentReads(true),
 		sftp.UseConcurrentWrites(true),
 	}
@@ -100,6 +101,26 @@ func shouldFallback(err error) bool {
 	}
 	msg := err.Error()
 	return strings.Contains(msg, "sizes larger than 32KB") || strings.Contains(strings.ToLower(msg), "maxpacket")
+}
+
+func minInt(a, b int) int {
+	if a == 0 {
+		return b
+	}
+	if b == 0 {
+		return a
+	}
+	if a < b {
+		return a
+	}
+	return b
+}
+
+func max(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
 }
 
 func (c *Client) closeSSH() error {

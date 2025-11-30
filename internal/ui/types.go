@@ -45,14 +45,15 @@ type entry struct {
 }
 
 type model struct {
-	panes    []*pane
-	focused  int
-	width    int
-	height   int
-	client   *sftp.Client
-	progress progress.Model
-	transfer transferState
-	job      *transferJob
+	panes       []*pane
+	focused     int
+	width       int
+	height      int
+	client      *sftp.Client
+	progress    progress.Model
+	transfer    transferState
+	job         *transferJob
+	transferCfg transferConfig
 }
 
 type pane struct {
@@ -78,4 +79,23 @@ type transferState struct {
 	lastUpdate  time.Time
 	rate        float64
 	refreshPane int
+}
+
+type transferConfig struct {
+	bufferSize       int
+	streams          int
+	progressInterval time.Duration
+}
+
+type Options struct {
+	LocalRoot  string
+	RemoteRoot string
+	Client     *sftp.Client
+	Transfer   TransferOptions
+}
+
+type TransferOptions struct {
+	BufferSize       int
+	ParallelStreams  int
+	ProgressInterval time.Duration
 }

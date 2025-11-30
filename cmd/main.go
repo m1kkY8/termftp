@@ -23,7 +23,16 @@ func main() {
 	}
 	defer client.Close()
 
-	m := ui.New(localRoot(), cfg.Root, client.Client)
+	m := ui.New(ui.Options{
+		LocalRoot:  localRoot(),
+		RemoteRoot: cfg.Root,
+		Client:     client.Client,
+		Transfer: ui.TransferOptions{
+			BufferSize:       cfg.BufferSizeBytes(),
+			ParallelStreams:  cfg.ParallelStreams(),
+			ProgressInterval: cfg.ProgressInterval(),
+		},
+	})
 	if _, err := tea.NewProgram(m, tea.WithAltScreen()).Run(); err != nil {
 		log.Fatalf("run ui: %v", err)
 	}

@@ -1,20 +1,22 @@
 package ui
 
 import (
+	"time"
+
 	"github.com/charmbracelet/bubbles/progress"
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/pkg/sftp"
 )
 
-func New(localRoot, remoteRoot string, remoteClient *sftp.Client) *model {
-	local := newPane("Local", defaultLocalRoot(localRoot), localProvider{}, false)
+func New(opts Options) *model {
+	transferCfg := normalizeTransferOptions(opts.Transfer)
+	local := newPane("Local", defaultLocalRoot(opts.LocalRoot), localProvider{}, false)
 	remoteProvider := dirProvider(localProvider{})
 	readonly := true
-	if remoteClient != nil {
-		remoteProvider = &sftpProvider{client: remoteClient}
+	if opts.Client != nil {
+		remoteProvider = &sftpProvider{client: opts.Client}
 		readonly = false
 	}
-	remote := newPane("Remote", defaultRemoteRoot(remoteRoot), remoteProvider, readonly)
+	remote := newPane("Remote", defaultRemoteRoot(opts.RemoteRoot), remoteProvider, readonly)
 
 	local.focus(true)
 	remote.focus(false)
@@ -23,10 +25,11 @@ func New(localRoot, remoteRoot string, remoteClient *sftp.Client) *model {
 	bar.Width = 40
 
 	return &model{
-		panes:    []*pane{local, remote},
-		focused:  paneLocal,
-		client:   remoteClient,
-		progress: bar,
+		panes:       []*pane{local, remote},
+		focused:     paneLocal,
+		client:      opts.Client,
+		progress:    bar,
+		transferCfg: transferCfg,
 	}
 }
 
@@ -74,5 +77,41 @@ func (m *model) resize(width, height int) {
 	}
 	if width > 0 {
 		m.progress.Width = max(10, width-4)
+	}
+}
+
+func normalizeTransferOptions(opts TransferOptions) transferConfig {
+	bufferSize := opts.BufferSize
+	if bufferSize <= 0 {
+		bufferSize = 8 * 1024 * 1024
+	}
+	// Clamp to avoid excessive memory use.
+	if bufferSize < 1024*1024 {
+		bufferSize = 1024 * 1024
+	}
+	if bufferSize > 64*1024*1024 {
+		bufferSize = 64 * 1024 * 1024
+	}
+	streams := opts.ParallelStreams
+	if streams <= 0 {
+		streams = 4
+	}
+	if streams > 32 {
+		streams = 32
+	}
+	interval := opts.ProgressInterval
+	if interval <= 0 {
+		interval = 75 * time.Millisecond
+	}
+	if interval < 25*time.Millisecond {
+		interval = 25 * time.Millisecond
+	}
+	if interval > time.Second {
+		interval = time.Second
+	}
+	return transferConfig{
+		bufferSize:       bufferSize,
+		streams:          streams,
+		progressInterval: interval,
 	}
 }

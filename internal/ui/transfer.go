@@ -1,59 +1,117 @@
 package ui
 
 import (
-	"errors"
 	"io"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/pkg/sftp"
 )
 
-const (
-	transferChunkSize  = 1024 * 1024
-	transferBatchBytes = 2 * transferChunkSize // update UI roughly every 2 MiB instead of 8
-)
-
-type transferProgressMsg struct {
-	delta int64
-	done  bool
-	err   error
+type transferTickMsg struct{}
+type transferDoneMsg struct {
+	err error
 }
 
 type transferJob struct {
-	reader  io.Reader
-	writer  io.Writer
-	closers []io.Closer
-	buffer  []byte
+	reader      io.Reader
+	writer      io.Writer
+	readerAt    io.ReaderAt
+	writerAt    io.WriterAt
+	size        int64
+	bufferSize  int
+	streams     int
+	closers     []io.Closer
+	transferred atomic.Int64
 }
 
-func (j *transferJob) step() (int64, bool, error) {
-	if j.buffer == nil {
-		j.buffer = make([]byte, transferChunkSize)
+func newTransferJob(reader io.Reader, writer io.Writer, size int64, closers []io.Closer, cfg transferConfig, readerAt io.ReaderAt, writerAt io.WriterAt) *transferJob {
+	if cfg.bufferSize <= 0 {
+		cfg.bufferSize = 8 * 1024 * 1024
 	}
-	var total int64
-	for total < transferBatchBytes {
-		read, readErr := j.reader.Read(j.buffer)
-		if read > 0 {
-			if _, writeErr := j.writer.Write(j.buffer[:read]); writeErr != nil {
-				return total + int64(read), true, writeErr
-			}
-			total += int64(read)
+	streams := cfg.streams
+	if streams <= 0 {
+		streams = 1
+	}
+	return &transferJob{
+		reader:     reader,
+		writer:     writer,
+		readerAt:   readerAt,
+		writerAt:   writerAt,
+		size:       size,
+		bufferSize: cfg.bufferSize,
+		streams:    streams,
+		closers:    closers,
+	}
+}
+
+func (j *transferJob) run() error {
+	if j.shouldUseParallel() {
+		return j.copyParallel()
+	}
+	return j.copySequential()
+}
+
+func (j *transferJob) shouldUseParallel() bool {
+	return j.streams > 1 && j.readerAt != nil && j.writerAt != nil && j.size > int64(j.bufferSize)
+}
+
+func (j *transferJob) copySequential() error {
+	buffer := make([]byte, j.bufferSize)
+	writer := &countingWriter{dst: j.writer, job: j}
+	_, err := io.CopyBuffer(writer, j.reader, buffer)
+	return err
+}
+
+func (j *transferJob) copyParallel() error {
+	streams := j.streams
+	if streams <= 1 {
+		return j.copySequential()
+	}
+	chunkSize := (j.size + int64(streams) - 1) / int64(streams)
+	var wg sync.WaitGroup
+	errCh := make(chan error, streams)
+	for i := 0; i < streams; i++ {
+		offset := int64(i) * chunkSize
+		length := minInt64(chunkSize, j.size-offset)
+		if length <= 0 {
+			continue
 		}
-		if readErr != nil {
-			if errors.Is(readErr, io.EOF) {
-				return total, true, nil
+		wg.Add(1)
+		go func(off, ln int64) {
+			defer wg.Done()
+			reader := io.NewSectionReader(j.readerAt, off, ln)
+			writer := &writerAtSection{WriterAt: j.writerAt, offset: off}
+			buffer := make([]byte, j.bufferSize)
+			_, err := io.CopyBuffer(&countingWriter{dst: writer, job: j}, reader, buffer)
+			if err != nil && err != io.EOF {
+				errCh <- err
 			}
-			return total, true, readErr
-		}
-		if read == 0 {
-			break
+		}(offset, length)
+	}
+	wg.Wait()
+	close(errCh)
+	for err := range errCh {
+		if err != nil {
+			return err
 		}
 	}
-	return total, false, nil
+	return nil
+}
+
+func (j *transferJob) add(n int64) {
+	if n > 0 {
+		j.transferred.Add(n)
+	}
+}
+
+func (j *transferJob) transferredBytes() int64 {
+	return j.transferred.Load()
 }
 
 func (j *transferJob) close() error {
@@ -68,6 +126,30 @@ func (j *transferJob) close() error {
 	}
 	j.closers = nil
 	return err
+}
+
+type countingWriter struct {
+	dst io.Writer
+	job *transferJob
+}
+
+func (w *countingWriter) Write(p []byte) (int, error) {
+	n, err := w.dst.Write(p)
+	if n > 0 {
+		w.job.add(int64(n))
+	}
+	return n, err
+}
+
+type writerAtSection struct {
+	io.WriterAt
+	offset int64
+}
+
+func (w *writerAtSection) Write(p []byte) (int, error) {
+	n, err := w.WriterAt.WriteAt(p, w.offset)
+	w.offset += int64(n)
+	return n, err
 }
 
 func (m *model) uploadSelected() tea.Cmd {
@@ -92,6 +174,7 @@ func (m *model) uploadSelected() tea.Cmd {
 	if err != nil {
 		return tea.Printf("open local file: %v", err)
 	}
+	adviseSequential(file)
 	info, err := file.Stat()
 	if err != nil {
 		file.Close()
@@ -101,27 +184,25 @@ func (m *model) uploadSelected() tea.Cmd {
 		file.Close()
 		return tea.Printf("prep remote dir: %v", err)
 	}
-	rc, err := m.client.Create(remotePath)
+	rc, err := m.client.OpenFile(remotePath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC)
 	if err != nil {
 		file.Close()
 		return tea.Printf("create remote file: %v", err)
 	}
-	m.job = &transferJob{
-		reader:  file,
-		writer:  rc,
-		closers: []io.Closer{file, rc},
-	}
-	m.transfer = transferState{
-		active:      true,
-		direction:   "Upload",
-		filename:    filepath.Base(localPath),
-		total:       info.Size(),
-		transferred: 0,
-		started:     time.Now(),
-		lastUpdate:  time.Now(),
-		refreshPane: paneRemote,
-	}
-	return tea.Batch(m.processTransferChunk())
+	_ = preallocateRemote(rc, info.Size())
+	m.setupTransferJob(
+		newTransferJob(file, rc, info.Size(), []io.Closer{file, rc}, m.transferCfg, file, rc),
+		transferState{
+			active:      true,
+			direction:   "Upload",
+			filename:    filepath.Base(localPath),
+			total:       info.Size(),
+			started:     time.Now(),
+			lastUpdate:  time.Now(),
+			refreshPane: paneRemote,
+		},
+	)
+	return m.startTransfer()
 }
 
 func (m *model) downloadSelected() tea.Cmd {
@@ -154,65 +235,92 @@ func (m *model) downloadSelected() tea.Cmd {
 		remoteFile.Close()
 		return tea.Printf("stat remote file: %v", err)
 	}
-	localFile, err := os.Create(localPath)
+	localFile, err := os.OpenFile(localPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
 	if err != nil {
 		remoteFile.Close()
 		return tea.Printf("create local file: %v", err)
 	}
-	m.job = &transferJob{
-		reader:  remoteFile,
-		writer:  localFile,
-		closers: []io.Closer{remoteFile, localFile},
-	}
-	m.transfer = transferState{
-		active:      true,
-		direction:   "Download",
-		filename:    filepath.Base(remotePath),
-		total:       info.Size(),
-		transferred: 0,
-		started:     time.Now(),
-		lastUpdate:  time.Now(),
-		refreshPane: paneLocal,
-	}
-	return tea.Batch(m.processTransferChunk())
+	adviseSequential(localFile)
+	m.setupTransferJob(
+		newTransferJob(remoteFile, localFile, info.Size(), []io.Closer{remoteFile, localFile}, m.transferCfg, remoteFile, localFile),
+		transferState{
+			active:      true,
+			direction:   "Download",
+			filename:    filepath.Base(remotePath),
+			total:       info.Size(),
+			started:     time.Now(),
+			lastUpdate:  time.Now(),
+			refreshPane: paneLocal,
+		},
+	)
+	return m.startTransfer()
 }
 
-func (m *model) processTransferChunk() tea.Cmd {
+func (m *model) setupTransferJob(job *transferJob, state transferState) {
+	m.job = job
+	state.transferred = 0
+	m.transfer = state
+}
+
+func (m *model) startTransfer() tea.Cmd {
+	return tea.Batch(m.runTransferJob(), m.scheduleProgressTick())
+}
+
+func (m *model) runTransferJob() tea.Cmd {
 	job := m.job
 	if job == nil {
 		return nil
 	}
 	return func() tea.Msg {
-		delta, done, err := job.step()
-		return transferProgressMsg{delta: delta, done: done, err: err}
+		err := job.run()
+		return transferDoneMsg{err: err}
 	}
 }
 
-func (m *model) handleTransferProgress(msg transferProgressMsg) tea.Cmd {
+func (m *model) scheduleProgressTick() tea.Cmd {
 	if !m.transfer.active {
 		return nil
 	}
-	if msg.delta > 0 {
-		m.transfer.transferred += msg.delta
+	interval := m.transferCfg.progressInterval
+	return tea.Tick(interval, func(time.Time) tea.Msg {
+		return transferTickMsg{}
+	})
+}
+
+func (m *model) handleTransferTick() tea.Cmd {
+	if !m.transfer.active || m.job == nil {
+		return nil
+	}
+	total := m.job.transferredBytes()
+	delta := total - m.transfer.transferred
+	if delta > 0 {
 		now := time.Now()
 		elapsed := now.Sub(m.transfer.lastUpdate).Seconds()
 		if elapsed <= 0 {
-			elapsed = 1
+			elapsed = 1e-6
 		}
-		m.transfer.rate = float64(msg.delta) / elapsed
+		instant := float64(delta) / elapsed
+		m.transfer.rate = smoothRate(m.transfer.rate, instant)
 		m.transfer.lastUpdate = now
+		m.transfer.transferred = total
 	}
-	if msg.err != nil {
-		return m.finishTransfer(msg.err)
+	return m.scheduleProgressTick()
+}
+
+func smoothRate(previous, instant float64) float64 {
+	const alpha = 0.35
+	if previous <= 0 {
+		return instant
 	}
-	if msg.done {
-		return m.finishTransfer(nil)
+	if instant <= 0 {
+		return previous * (1 - alpha)
 	}
-	return m.processTransferChunk()
+	return previous*(1-alpha) + instant*alpha
 }
 
 func (m *model) finishTransfer(resultErr error) tea.Cmd {
 	if m.job != nil {
+		m.transfer.transferred = m.job.transferredBytes()
 		if cerr := m.job.close(); resultErr == nil {
 			resultErr = cerr
 		}
@@ -240,6 +348,13 @@ func ensureRemoteDir(client *sftp.Client, path string) error {
 		return nil
 	}
 	return client.MkdirAll(path)
+}
+
+func preallocateRemote(f *sftp.File, size int64) error {
+	if f == nil || size <= 0 {
+		return nil
+	}
+	return f.Truncate(size)
 }
 
 func (t transferState) percent() float64 {
@@ -272,14 +387,23 @@ func (t transferState) currentSpeed() float64 {
 }
 
 func (t transferState) eta() time.Duration {
-	speed := t.currentSpeed()
-	if speed <= 0 || t.total == 0 {
+	if t.total <= 0 {
+		return 0
+	}
+	rate := t.currentSpeed()
+	if rate <= 0 {
 		return 0
 	}
 	remaining := float64(t.total - t.transferred)
 	if remaining <= 0 {
 		return 0
 	}
-	seconds := remaining / speed
-	return time.Duration(seconds * float64(time.Second))
+	return time.Duration(remaining/rate) * time.Second
+}
+
+func minInt64(a, b int64) int64 {
+	if a < b {
+		return a
+	}
+	return b
 }
