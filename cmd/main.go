@@ -24,7 +24,7 @@ func main() {
 	defer client.Close()
 
 	m := ui.New(localRoot(), cfg.Root, client.Client)
-	if _, err := tea.NewProgram(m).Run(); err != nil {
+	if _, err := tea.NewProgram(m, tea.WithAltScreen()).Run(); err != nil {
 		log.Fatalf("run ui: %v", err)
 	}
 }

@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"github.com/charmbracelet/bubbles/progress"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/pkg/sftp"
 )
@@ -18,10 +19,14 @@ func New(localRoot, remoteRoot string, remoteClient *sftp.Client) *model {
 	local.focus(true)
 	remote.focus(false)
 
+	bar := progress.New(progress.WithDefaultGradient())
+	bar.Width = 40
+
 	return &model{
-		panes:   []*pane{local, remote},
-		focused: paneLocal,
-		client:  remoteClient,
+		panes:    []*pane{local, remote},
+		focused:  paneLocal,
+		client:   remoteClient,
+		progress: bar,
 	}
 }
 
@@ -58,8 +63,16 @@ func (m *model) resize(width, height int) {
 	}
 	gap := 4
 	paneWidth := max(20, (width-gap)/len(m.panes))
-	paneHeight := max(7, height-2)
+	availableHeight := height
+	if availableHeight <= 0 {
+		availableHeight = 20
+	}
+	transferReserve := max(6, availableHeight/4)
+	paneHeight := max(7, int(float64(availableHeight-transferReserve)*0.6))
 	for _, p := range m.panes {
 		p.setSize(paneWidth, paneHeight)
+	}
+	if width > 0 {
+		m.progress.Width = max(10, width-4)
 	}
 }

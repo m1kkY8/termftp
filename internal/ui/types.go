@@ -1,6 +1,9 @@
 package ui
 
 import (
+	"time"
+
+	"github.com/charmbracelet/bubbles/progress"
 	"github.com/charmbracelet/bubbles/table"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/pkg/sftp"
@@ -42,11 +45,14 @@ type entry struct {
 }
 
 type model struct {
-	panes   []*pane
-	focused int
-	width   int
-	height  int
-	client  *sftp.Client
+	panes    []*pane
+	focused  int
+	width    int
+	height   int
+	client   *sftp.Client
+	progress progress.Model
+	transfer transferState
+	job      *transferJob
 }
 
 type pane struct {
@@ -59,4 +65,16 @@ type pane struct {
 	height   int
 	focused  bool
 	readonly bool
+}
+
+type transferState struct {
+	active      bool
+	direction   string
+	filename    string
+	total       int64
+	transferred int64
+	started     time.Time
+	err         error
+	lastUpdate  time.Time
+	rate        float64
 }
