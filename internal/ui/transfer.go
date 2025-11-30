@@ -12,7 +12,10 @@ import (
 	"github.com/pkg/sftp"
 )
 
-const transferChunkSize = 64 * 1024
+const (
+	transferChunkSize  = 1024 * 1024
+	transferBatchBytes = 2 * transferChunkSize // update UI roughly every 2 MiB instead of 8
+)
 
 type transferProgressMsg struct {
 	delta int64
@@ -31,19 +34,26 @@ func (j *transferJob) step() (int64, bool, error) {
 	if j.buffer == nil {
 		j.buffer = make([]byte, transferChunkSize)
 	}
-	read, readErr := j.reader.Read(j.buffer)
-	if read > 0 {
-		if _, writeErr := j.writer.Write(j.buffer[:read]); writeErr != nil {
-			return int64(read), true, writeErr
+	var total int64
+	for total < transferBatchBytes {
+		read, readErr := j.reader.Read(j.buffer)
+		if read > 0 {
+			if _, writeErr := j.writer.Write(j.buffer[:read]); writeErr != nil {
+				return total + int64(read), true, writeErr
+			}
+			total += int64(read)
+		}
+		if readErr != nil {
+			if errors.Is(readErr, io.EOF) {
+				return total, true, nil
+			}
+			return total, true, readErr
+		}
+		if read == 0 {
+			break
 		}
 	}
-	if readErr != nil {
-		if errors.Is(readErr, io.EOF) {
-			return int64(read), true, nil
-		}
-		return int64(read), true, readErr
-	}
-	return int64(read), false, nil
+	return total, false, nil
 }
 
 func (j *transferJob) close() error {

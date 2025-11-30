@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 	"strconv"
+	"strings"
 
 	"github.com/pkg/sftp"
 	"golang.org/x/crypto/ssh"
@@ -13,6 +14,11 @@ import (
 )
 
 const defaultSSHPort = 22
+const (
+	maxPacketBytes               = 1 << 20 // 1 MiB packets keep queues full
+	fallbackPacketBytes          = 32 * 1024
+	maxConcurrentRequestsPerFile = 64
+)
 
 type Client struct {
 	*sftp.Client
@@ -39,7 +45,7 @@ func New(cfg *config.Config) (*Client, error) {
 		return nil, fmt.Errorf("dial ssh: %w", err)
 	}
 
-	sftpConn, err := sftp.NewClient(sshConn)
+	sftpConn, err := dialSFTP(sshConn)
 	if err != nil {
 		sshConn.Close()
 		return nil, fmt.Errorf("create sftp client: %w", err)
@@ -63,6 +69,37 @@ func (c *Client) Close() error {
 	}
 
 	return err
+}
+
+func dialSFTP(sshConn *ssh.Client) (*sftp.Client, error) {
+	primaryOpts := []sftp.ClientOption{
+		sftp.MaxPacket(maxPacketBytes),
+		sftp.MaxConcurrentRequestsPerFile(maxConcurrentRequestsPerFile),
+		sftp.UseConcurrentReads(true),
+		sftp.UseConcurrentWrites(true),
+	}
+	client, err := sftp.NewClient(sshConn, primaryOpts...)
+	if err == nil {
+		return client, nil
+	}
+	if !shouldFallback(err) {
+		return nil, err
+	}
+	fallbackOpts := []sftp.ClientOption{
+		sftp.MaxPacket(fallbackPacketBytes),
+		sftp.MaxConcurrentRequestsPerFile(maxConcurrentRequestsPerFile / 2),
+		sftp.UseConcurrentReads(true),
+		sftp.UseConcurrentWrites(true),
+	}
+	return sftp.NewClient(sshConn, fallbackOpts...)
+}
+
+func shouldFallback(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "sizes larger than 32KB") || strings.Contains(strings.ToLower(msg), "maxpacket")
 }
 
 func (c *Client) closeSSH() error {
