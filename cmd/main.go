@@ -1,8 +1,9 @@
 package main
 
 import (
-	"fmt"
+	"log"
 	"os"
+	"path/filepath"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/m1kkY8/termftp/internal/config"
@@ -11,37 +12,32 @@ import (
 )
 
 func main() {
-	m := ui.New()
-	if _, err := tea.NewProgram(m).Run(); err != nil {
-		fmt.Println("Error running program:", err)
-		os.Exit(1)
-	}
-
-	// if err := run(); err != nil {
-	// 	log.Fatal(err)
-	// }
-}
-
-func run() error {
 	cfg, err := config.LoadConfig()
 	if err != nil {
-		return fmt.Errorf("load config: %w", err)
+		log.Fatalf("load config: %v", err)
 	}
 
 	client, err := sftpclient.New(cfg)
 	if err != nil {
-		return fmt.Errorf("init sftp client: %w", err)
+		log.Fatalf("init sftp client: %v", err)
 	}
 	defer client.Close()
 
-	files, err := client.ReadDir(cfg.Root)
-	if err != nil {
-		return fmt.Errorf("read remote dir %q: %w", cfg.Root, err)
+	m := ui.New(localRoot(), cfg.Root, client.Client)
+	if _, err := tea.NewProgram(m).Run(); err != nil {
+		log.Fatalf("run ui: %v", err)
 	}
+}
 
-	for _, file := range files {
-		fmt.Printf("%s\tSize: %dB\n", file.Name(), file.Size())
+func localRoot() string {
+	if root := os.Getenv("TERMFTP_LOCAL_ROOT"); root != "" {
+		if abs, err := filepath.Abs(root); err == nil {
+			return abs
+		}
+		return root
 	}
-
-	return nil
+	if wd, err := os.Getwd(); err == nil {
+		return wd
+	}
+	return "."
 }
